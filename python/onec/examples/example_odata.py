@@ -1,4 +1,4 @@
-from python.src.onec.integration.odata_request import executeQuery
+from python.onec.integration.odata_request import executeQuery
 import json
 entity_name = "Catalog_Номенклатура"
 params = {

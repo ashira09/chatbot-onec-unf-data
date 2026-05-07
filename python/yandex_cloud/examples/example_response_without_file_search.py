@@ -1,6 +1,6 @@
 import json
 from openai import OpenAI
-from python.src.yandex_cloud.load import IAM_TOKEN, BASE_URL, FOLDER_ID, MODEL, VECTOR_STORE_ID
+from python.yandex_cloud.load import IAM_TOKEN, BASE_URL, FOLDER_ID, MODEL, VECTOR_STORE_ID
 
 client = OpenAI(api_key=IAM_TOKEN, base_url=BASE_URL, project=FOLDER_ID)
 
