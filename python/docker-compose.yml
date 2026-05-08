@@ -1,0 +1,19 @@
+version: '3.8'
+
+services:
+  fastapi-app:
+    build: .
+    container_name: bitrix-webhook
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ENV=production
+    volumes:
+      - ./logs:/app/logs  # для логов, если добавите файловый хендлер
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    driver: bridge
