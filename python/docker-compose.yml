@@ -5,8 +5,6 @@ services:
     build: .
     container_name: bitrix-webhook
     restart: unless-stopped
-    ports:
-      - "8000:8000"
     environment:
       - ENV=production
     volumes:
