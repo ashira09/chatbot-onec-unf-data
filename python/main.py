@@ -6,8 +6,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 app = FastAPI()
 
-app = FastAPI()
-
 @app.post("/bitrix-event")
 async def echo(request: Request):
     body = await request.body()
