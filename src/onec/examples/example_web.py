@@ -1,4 +1,4 @@
-from python.onec.integration.web_request import executeQuery
+from src.onec.integration.web_request import executeQuery
 import json
 
 query_text = "ВЫБРАТЬ ПЕРВЫЕ 5 Код, Наименование ИЗ Справочник.Номенклатура"

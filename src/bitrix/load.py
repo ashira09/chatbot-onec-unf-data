@@ -12,3 +12,6 @@ BOT_WORK_POSITION=getenv('BOT_WORK_POSITION')
 BOT_ID=getenv('BOT_ID')
 BOT_EVENT_MODE=getenv('BOT_EVENT_MODE')
 BOT_HANDLER_URL=getenv('BOT_HANDLER_URL')
+
+if any([var is None for var in [WEBHOOK, BOT_TOKEN, BOT_NAME, BOT_CODE, BOT_WORK_POSITION, BOT_ID, BOT_EVENT_MODE, BOT_HANDLER_URL]]):
+    raise Exception('Заданы не все переменные в .env!')

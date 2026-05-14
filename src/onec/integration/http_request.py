@@ -1,7 +1,7 @@
 import requests
 import json
-from python.onec.load import ONEC_HOST, ONEC_CONF_USER, ONEC_CONF_PASSWORD
-from python.onec.integration.auth import create_auth_header
+from src.onec.load import ONEC_HOST, ONEC_CONF_USER, ONEC_CONF_PASSWORD
+from src.onec.integration.auth import create_auth_header
 
 def executeQuery(query_text):
     url = f"{ONEC_HOST}/unf/hs/api/query"

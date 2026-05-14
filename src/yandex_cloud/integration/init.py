@@ -1,9 +1,9 @@
 from openai import OpenAI
 from dotenv import set_key
 from os import environ
-from python.yandex_cloud.load import IAM_TOKEN, OAUTH_TOKEN, BASE_URL, FOLDER_ID, FILE_ID, PATH_TO_CHUNKS, VECTOR_STORE_ID
-from python.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
-from python.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index
+from src.yandex_cloud.load import IAM_TOKEN, OAUTH_TOKEN, BASE_URL, FOLDER_ID, FILE_ID, PATH_TO_CHUNKS, VECTOR_STORE_ID
+from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
+from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index
 
 revoke_iam_token_response = revoke_iam_token(IAM_TOKEN)
 create_iam_token_response = create_iam_token(OAUTH_TOKEN)

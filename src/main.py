@@ -1,12 +1,17 @@
 import asyncio
 import logging
 from typing import Optional
-
+import sys
 import requests
-from python.bitrix.load import BOT_ID, BOT_TOKEN, WEBHOOK
 
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
+
+try: 
+    from src.bitrix.load import BOT_ID, BOT_TOKEN, WEBHOOK
+except Exception as e:
+    logger.error(e)
+    sys.exit()
 
 session = requests.Session()
 session.headers.update({'Content-Type': 'application/json', 'Accept': 'application/json'})
