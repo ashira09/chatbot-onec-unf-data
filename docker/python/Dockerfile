@@ -8,4 +8,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY /src ./src
 
+COPY .env .
+
 CMD ["python", "-m", "src.main"]
