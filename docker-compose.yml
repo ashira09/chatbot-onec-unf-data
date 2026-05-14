@@ -1,17 +1,7 @@
-version: '3.8'
-
 services:
-  fastapi-app:
-    build: .
-    container_name: bitrix-webhook
+  python:
+    build: 
+      dockerfile: ./docker/python/Dockerfile
+      context: ./
+    container_name: python
     restart: unless-stopped
-    environment:
-      - ENV=production
-    volumes:
-      - ./logs:/app/logs  # для логов, если добавите файловый хендлер
-    networks:
-      - app-net
-
-networks:
-  app-net:
-    driver: bridge
