@@ -1,5 +1,4 @@
 **Интеграция с 1С** (конфигурацию опубликована на VPS, можно попробовать без локальной публикации):
-* **Расширение к 1С:УНФ** - onec;
 * **Отправить HTTP-запрос к 1С через 1C:UNF** - python/onec/examples/example_http.py;
 * **Отправить WEB-запрос к 1С через 1C:UNF** - python/onec/examples/example_web.py;
 * **Отправить OData-запрос к 1С через 1C:UNF** - python/onec/examples/example_odata.py.
