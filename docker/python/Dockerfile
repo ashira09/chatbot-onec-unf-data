@@ -6,8 +6,9 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY /src ./src
-
 COPY .env .
 
-CMD ["python", "-m", "src.main"]
+COPY /docker/python/entrypoint.sh ./docker/python/entrypoint.sh
+RUN chmod +x ./docker/python/entrypoint.sh
+
+CMD ["bash", "./docker/python/entrypoint.sh"]

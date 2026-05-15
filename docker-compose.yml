@@ -4,7 +4,5 @@ services:
       dockerfile: ./docker/python/Dockerfile
       context: ./
     container_name: python
-    restart: unless-stopped
     volumes:
-      - "./src:/app/src" 
-      - ".env:/app/.env"
+      - "./src:/app/src"
