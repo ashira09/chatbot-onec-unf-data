@@ -1,6 +1,6 @@
 import requests
 
-def bot_register(webhook, bot_token, bot_code, bot_name, bot_work_position, bot_event_mode, webhook_url):
+def bot_register(webhook, bot_token, bot_code, bot_name, bot_work_position):
     url = webhook + 'imbot.v2.Bot.register'
     headers = {
         'Content-Type': 'application/json'
@@ -13,8 +13,7 @@ def bot_register(webhook, bot_token, bot_code, bot_name, bot_work_position, bot_
                 "name": bot_name, 
                 "workPosition": bot_work_position
             },
-            "eventMode": bot_event_mode,
-            "webhookUrl": webhook_url
+            "eventMode": "fetch",
         }
     }
 
