@@ -1,4 +1,4 @@
-from src.bitrix.integration.auth import bot_register, bot_unregister, event_subscribe
+from src.bitrix.integration.auth import bot_register, bot_unregister
 from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_ID, BOT_TOKEN, BOT_WORK_POSITION, BOT_EVENT_MODE, BOT_HANDLER_URL
 from dotenv import set_key
 from os import environ
