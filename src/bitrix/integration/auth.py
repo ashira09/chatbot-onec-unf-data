@@ -32,3 +32,17 @@ def bot_unregister(webhook, bot_id, bot_token):
 
     response = requests.post(url, headers=headers, json=payload)
     return response.json()
+
+def get_bot_list(webhook, bot_token):
+    url = webhook + 'imbot.v2.Bot.list'
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    payload = {
+        "botToken": bot_token,
+        "filter":{"type":"bot"},
+        "limit":10
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    return response.json()
