@@ -14,3 +14,12 @@ def executeQuery(query_text):
     }
     response = requests.post(url, headers=headers, json=payload)
     return response.json()
+
+def getStructure():
+    url = f"{ONEC_HOST}/unf/hs/api/structure"
+    headers = {
+        'Content-Type': 'application/json',
+        "Authorization": create_auth_header(ONEC_CONF_USER, ONEC_CONF_PASSWORD)
+    }
+    response = requests.get(url, headers=headers)
+    return response.json()
