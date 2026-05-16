@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 try: 
     from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_TOKEN, BOT_WORK_POSITION
-    from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VECTOR_STORE_TOKEN, PATH_TO_CHUNKS
+    from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VECTOR_STORE_TOKEN
     from src.onec.integration.http_request import executeQuery
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
     from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes
