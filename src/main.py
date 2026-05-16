@@ -11,11 +11,11 @@ logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 try: 
-    from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_ID, BOT_TOKEN, BOT_WORK_POSITION
+    from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_TOKEN, BOT_WORK_POSITION
     from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VECTOR_STORE_TOKEN, PATH_TO_CHUNKS
     from src.onec.integration.http_request import executeQuery
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
-    from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index
+    from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
 except Exception as e:
     logger.error(e)
@@ -37,6 +37,8 @@ class ChatBot:
         self.offset = 0
         self.running = True
 
+        jsonl_stream = convert_1c_to_jsonl_bytes()
+
         self.iam_token = create_iam_token(OAUTH_TOKEN)['iamToken']
         self.llm_client = OpenAI(
             api_key=self.iam_token,
@@ -45,7 +47,7 @@ class ChatBot:
         )
         files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == FILE_TOKEN]
         if (len(files) == 0):
-            self.file = load_chunks(self.llm_client, PATH_TO_CHUNKS, FILE_TOKEN)
+            self.file = load_chunks(self.llm_client, jsonl_stream, FILE_TOKEN)
         else:
             self.file = files[0]
         vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VECTOR_STORE_TOKEN]
