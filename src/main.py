@@ -23,6 +23,7 @@ try:
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
     from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes, convert_1c_to_documents, convert_syntax_to_jsonl_bytes
     from src.yandex_cloud.integration.semantic_cache import SemanticCache
+    from src.yandex_cloud.integration.query_generator import QueryGenerator
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
     from src.onec.load import ONEC_CONF_PASSWORD, ONEC_CONF_USER
 except Exception as e:
@@ -96,6 +97,17 @@ class ChatBot:
             syntax_vector_store_id=self.val_vector_store.id,
             top_k=5,
             min_relevance_score=0.6
+        )
+
+        self.query_generator = QueryGenerator(
+            llm_client=self.llm_client,
+            hybrid_retriever=self.hybrid_retriever,
+            vector_store_id=self.vector_store.id,
+            folder_id=FOLDER_ID,
+            model=MODEL,
+            temperature=self.llm_temperature,
+            max_output_tokens=self.max_output_tokens,
+            query_validator=self.query_validator  # Передаём валидатор для цепочки
         )
 
     def _load_documents_for_indexing(self) -> list:
@@ -292,85 +304,6 @@ class ChatBot:
 
     # ==================== ОСНОВНАЯ ЛОГИКА ====================
 
-    def _generate_1c_query(self, user_question: str, error_context: Optional[dict] = None) -> Optional[str]:
-        """Генерирует запрос к 1С на основе вопроса пользователя и контекста ошибки (если есть)"""
-        try:
-            instructions = (
-                "Ты — ассистент для генерации запросов к 1С:УНФ на языке запросов 1С.\n\n"
-                "ПРАВИЛА:\n"
-                "1. Если нужная таблица или поле не найдены в контексте — верни: \"ОШИБКА: таблица/поле не найдено в индексе\".\n"
-                "2. Никогда не придумывай имена таблиц, полей или алиасы, которых нет в контексте.\n"
-                "3. Не добавляй пояснения, markdown, кавычки — только чистый текст запроса 1С.\n"
-                "4. Перед генерацией запроса мысленно проверь: существует ли указанная таблица в подключенном индексе?\n\n"
-            )
-            
-            if error_context:
-                user_input = (
-                    f"Пользователь спросил: {user_question}\n\n"
-                    f"Последняя версия запроса:\n{error_context['last_query']}\n\n"
-                    f"Ошибка при выполнении в 1С:\n{error_context['error_text']}\n\n"
-                    f"Исправь запрос с учётом ошибки и верни только исправленный код запроса 1С."
-                )
-            else:
-                user_input = user_question
-            
-            dense_docs, dense_scores = self._fetch_vector_search_results(user_question, top_k=20)
-            reranked_docs = self.hybrid_retriever.search(
-                query=user_question,
-                dense_results=dense_docs,
-                dense_scores=dense_scores
-            )
-            
-            context_parts = []
-            for doc in reranked_docs:
-                content = doc.get("content", "")
-                metadata = {k: v for k, v in doc.items() if k not in ["content", "id"]}
-                context_parts.append(f"[METADATA] {metadata}\n[CONTENT] {content}")
-            retrieval_context = "\n\n".join(context_parts) if context_parts else "Контекст не найден."
-
-            response = self.llm_client.responses.create(
-                model=f"gpt://{FOLDER_ID}/{MODEL}",
-                temperature=self.llm_temperature,
-                max_output_tokens=self.max_output_tokens,
-                instructions=instructions + f"\n\nРЕЛЕВАНТНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ:\n{retrieval_context}",
-                input=user_input,
-            )
-            
-            query = response.output_text.strip()
-            query = re.sub(r'^```(?:1c|sql)?\s*', '', query, flags=re.IGNORECASE)
-            query = re.sub(r'\s*```$', '', query)
-            query = query.strip()
-
-            if query and not query.startswith("ОШИБКА:"):
-                is_valid, validation_msg = self.query_validator.validate_query(
-                    query, 
-                    context_tables=None
-                )
-                if not is_valid:
-                    logger.warning(f"Запрос не прошёл валидацию: {validation_msg}")
-                    return f"ОШИБКА: {validation_msg}"
-
-            return query
-            
-        except Exception as e:
-            logger.exception(f"LLM query generation error: {e}")
-            return None
-
-    def _fetch_vector_search_results(self, query: str, top_k: int = 20) -> Tuple[List[Dict], List[float]]:
-        """Получает результаты плотного поиска из векторного хранилища."""
-        try:
-            search_result = self.llm_client.vector_stores.search(
-                vector_store_id=self.vector_store.id,
-                query=query,
-                max_num_results=top_k
-            )
-            docs = [{"id": r.file_id, "content": r.content} for r in search_result.data]
-            scores = [r.score for r in search_result.data]
-            return docs, scores
-        except Exception as e:
-            logger.error(f"Ошибка поиска в векторном хранилище: {e}")
-            return [], []
-
     def _execute_1c_query(self, query: str) -> tuple[bool, any]:
         """Выполняет запрос в 1С и возвращает (успех, результат/ошибка)"""
         try:
@@ -439,7 +372,7 @@ class ChatBot:
             # === СЦЕНАРИЙ: КЭША НЕТ ===
             # Генерируем новый запрос
             logger.info("Запрос не найден в кэше, генерируем новый...")
-            query_text = self._generate_1c_query(user_question)
+            query_text = self.query_generator.generate(user_question)
             
             if not query_text or query_text.startswith("ОШИБКА:"):
                 answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
@@ -506,7 +439,7 @@ class ChatBot:
                 if attempt < self.max_retries - 1:
                     # При ошибке выполнения пытаемся перегенерировать
                     # Это будет уже ДРУГОЙ запрос, его нужно сохранить как новый
-                    new_query = self._generate_1c_query(
+                    new_query = self.query_generator.generate(
                         user_question,
                         error_context={'last_query': query_text, 'error_text': result}
                     )
