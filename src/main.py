@@ -37,11 +37,7 @@ class ChatBot:
     def __init__(self, token: str, webhook: str):
         self.token = token
         self.webhook = webhook
-        bots = [bot for bot in get_bot_list(webhook=self.webhook, bot_token=self.token)['result']['bots'] if bot['code'] == BOT_CODE]
-        if len(bots) == 0:
-            self.bot = bot_register(webhook=self.webhook, bot_code=BOT_CODE, bot_name=BOT_NAME, bot_token=self.token, bot_work_position=BOT_WORK_POSITION)['result']['bot']
-        else:
-            self.bot = bots[0]
+        self.bot = self._bot_init()
         self.bot_id = self.bot['id']
         self.offset = 0
         self.running = True
@@ -63,28 +59,11 @@ class ChatBot:
             base_url=BASE_URL,
             project=FOLDER_ID
         )
-        files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == FILE_TOKEN]
-        if (len(files) == 0):
-            jsonl_stream = convert_1c_to_jsonl_bytes()
-            self.file = load_chunks(self.llm_client, jsonl_stream, FILE_TOKEN)
-        else:
-            self.file = files[0]
-        vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VECTOR_STORE_TOKEN]
-        if (len(vector_stores) == 0):
-            self.vector_store = create_search_index(self.llm_client, [FILE_TOKEN], VECTOR_STORE_TOKEN)
-        else:
-            self.vector_store = vector_stores[0]
-        files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == VAL_FILE_TOKEN]
-        if (len(files) == 0):
-            jsonl_stream = convert_syntax_to_jsonl_bytes(Path(PATH_TO_SYNTAX))
-            self.file = load_chunks(self.llm_client, jsonl_stream, VAL_FILE_TOKEN)
-        else:
-            self.file = files[0]
-        vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VAL_VECTOR_STORE_TOKEN]
-        if (len(vector_stores) == 0):
-            self.val_vector_store = create_search_index(self.llm_client, [VAL_FILE_TOKEN], VAL_VECTOR_STORE_TOKEN)
-        else:
-            self.val_vector_store = vector_stores[0]
+        self.file = self._file_init()
+        self.vector_store = self._vector_store_init()
+        self.val_file = self._val_file_init()
+        self.val_vector_store = self._val_vector_store_init()
+
         self.max_retries = 3
         self.llm_temperature = 0.3
         self.max_output_tokens = 500
@@ -109,6 +88,48 @@ class ChatBot:
             max_output_tokens=self.max_output_tokens,
             query_validator=self.query_validator  # Передаём валидатор для цепочки
         )
+
+    def _val_vector_store_init(self):
+        vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VAL_VECTOR_STORE_TOKEN]
+        if (len(vector_stores) == 0):
+            val_vector_store = create_search_index(self.llm_client, [VAL_FILE_TOKEN], VAL_VECTOR_STORE_TOKEN)
+        else:
+            val_vector_store = vector_stores[0]
+        return val_vector_store
+
+    def _val_file_init(self):
+        files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == VAL_FILE_TOKEN]
+        if (len(files) == 0):
+            jsonl_stream = convert_syntax_to_jsonl_bytes(Path(PATH_TO_SYNTAX))
+            val_file = load_chunks(self.llm_client, jsonl_stream, VAL_FILE_TOKEN)
+        else:
+            val_file = files[0]
+        return val_file
+
+    def _vector_store_init(self):
+        vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VECTOR_STORE_TOKEN]
+        if (len(vector_stores) == 0):
+            vector_store = create_search_index(self.llm_client, [FILE_TOKEN], VECTOR_STORE_TOKEN)
+        else:
+            vector_store = vector_stores[0]
+        return vector_store
+    
+    def _file_init(self):
+        files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == FILE_TOKEN]
+        if (len(files) == 0):
+            jsonl_stream = convert_1c_to_jsonl_bytes()
+            file = load_chunks(self.llm_client, jsonl_stream, FILE_TOKEN)
+        else:
+            file = files[0]
+        return file
+
+    def _bot_init(self):
+        bots = [bot for bot in get_bot_list(webhook=self.webhook, bot_token=self.token)['result']['bots'] if bot['code'] == BOT_CODE]
+        if len(bots) == 0:
+            bot = bot_register(webhook=self.webhook, bot_code=BOT_CODE, bot_name=BOT_NAME, bot_token=self.token, bot_work_position=BOT_WORK_POSITION)['result']['bot']
+        else:
+            bot = bots[0]
+        return bot
 
     def _load_documents_for_indexing(self) -> list:
         """Загружает документы из 1С для индексации в гибридном ретривере."""
