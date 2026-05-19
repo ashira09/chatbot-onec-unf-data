@@ -22,6 +22,7 @@ try:
     from src.yandex_cloud.integration.query_validator import QueryValidator
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
     from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes, convert_1c_to_documents, convert_syntax_to_jsonl_bytes
+    from src.yandex_cloud.integration.semantic_cache import SemanticCache
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
     from src.onec.load import ONEC_CONF_PASSWORD, ONEC_CONF_USER
 except Exception as e:
@@ -52,6 +53,8 @@ class ChatBot:
         )
         documents = self._load_documents_for_indexing()
         self.hybrid_retriever.index_documents(documents)
+
+        self.semantic_cache = SemanticCache(threshold=0.85, cache_limit=200)
 
         self.iam_token = create_iam_token(OAUTH_TOKEN)['iamToken']
         self.llm_client = OpenAI(
@@ -252,14 +255,17 @@ class ChatBot:
         ))
 
     def _log_interaction_sync(self, user_id: int, chat_id: str, user_name: str,
-                            user_question: str, generated_query: Optional[str],
-                            success: bool, error_text: Optional[str] = None):
+                             user_question: str, 
+                             generated_query: Optional[str] = None,
+                             existing_request_id: Optional[int] = None,
+                             success: bool = True, error_text: Optional[str] = None):
         """
-        Сохраняет сообщение пользователя и (опционально) связанный 1C-запрос.
+        Сохраняет сообщение пользователя и (опционально) связывает его с 1C-запросом.
         
         Логика:
-        - user_question → сохраняется в message (всегда)
-        - generated_query → сохраняется в request (если есть), связывается через request_id
+        1. Если передан existing_request_id -> используем его (кэш).
+        2. Если existing_request_id НЕТ, но есть generated_query -> сохраняем в БД как новый.
+        3. Если ничего нет -> request_id = NULL (приветствия).
         """
         # 1. Гарантируем наличие пользователя и чата
         user = self._ensure_user_in_db(user_id, user_name)
@@ -269,17 +275,19 @@ class ChatBot:
             logger.warning("Не удалось сохранить взаимодействие: пользователь или чат не найдены")
             return
         
-        # 2. Если есть сгенерированный 1C-запрос → сохраняем его в request
-        request_id = None
-        if generated_query and not generated_query.startswith("ОШИБКА:"):
-            request_id = self._save_1c_query_to_db(generated_query)
+        # 2. Определяем final_request_id
+        final_request_id = existing_request_id
         
-        # 3. Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ (с привязкой к 1C-запросу или NULL)
+        # Если ID нет, но есть текст запроса — значит это НОВЫЙ запрос, нужно сохранить в БД
+        if final_request_id is None and generated_query and not generated_query.startswith("ОШИБКА:"):
+            final_request_id = self._save_1c_query_to_db(generated_query)
+        
+        # 3. Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ (с привязкой к ID или NULL)
         self._save_message_to_db(
             user_id=user_id,
             chat_id=chat_id,
-            user_message=user_question,  # ← Сообщение пользователя!
-            request_id=request_id
+            user_message=user_question,
+            request_id=final_request_id  # Будет либо ID из кэша, либо новый ID, либо None
         )
 
     # ==================== ОСНОВНАЯ ЛОГИКА ====================
@@ -424,62 +432,113 @@ class ChatBot:
 
     def _process_user_message(self, chat_id: str, user_question: str, user_name: str, user_id: int):
         """
-        Основная логика: вопрос пользователя → генерация 1C-запроса → выполнение → ответ.
-        В БД сохраняется ТОЛЬКО сообщение пользователя (и опционально 1C-запрос).
+        Основная логика с использованием SemanticCache.
         """
-        generated_query = None
+        request_id = None
+        query_text = None
+        error_text = None
+        success = False
         
-        # Генерируем запрос к 1С
-        query = self._generate_1c_query(user_question)
-        generated_query = query
+        # === ШАГ 1: Проверка кэша ===
+        cached_result = self.semantic_cache.find(user_question)
         
-        if not query:
-            answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
-            self._send(chat_id, answer)
-            # Логируем сообщение пользователя (без 1C-запроса)
-            self._log_interaction_sync(
-                user_id=user_id, chat_id=chat_id, user_name=user_name,
-                user_question=user_question,  # ← Сообщение пользователя
-                generated_query=None,
-                success=False, error_text="Query generation failed"
-            )
-            return
+        if cached_result:
+            # === СЦЕНАРИЙ: КЭШ НАЙДЕН ===
+            # Берем готовый ID и текст. 
+            # В таблицу request ничего НЕ добавляем!
+            request_id, query_text = cached_result
+            logger.info("Используем запрос из семантического кэша (без записи в БД).")
+        else:
+            # === СЦЕНАРИЙ: КЭША НЕТ ===
+            # Генерируем новый запрос
+            logger.info("Запрос не найден в кэше, генерируем новый...")
+            query_text = self._generate_1c_query(user_question)
+            
+            if not query_text or query_text.startswith("ОШИБКА:"):
+                answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
+                self._send(chat_id, answer)
+                # Передаем None вместо request_id -> сообщение сохранится без привязки
+                self._log_interaction_sync(
+                    user_id=user_id, chat_id=chat_id, user_name=user_name,
+                    user_question=user_question, generated_query=None,
+                    success=False, error_text="Query generation failed"
+                )
+                return
 
-        last_query = query
+            # Валидация
+            is_valid, validation_msg = self.query_validator.validate_query(query_text)
+            if not is_valid:
+                answer = f"Запрос не прошёл валидацию: {validation_msg}"
+                self._send(chat_id, answer)
+                self._log_interaction_sync(
+                    user_id=user_id, chat_id=chat_id, user_name=user_name,
+                    user_question=user_question, generated_query=None,
+                    success=False, error_text=validation_msg
+                )
+                return
+
+            # request_id пока None, он создастся внутри _log_interaction_sync автоматически,
+            # так как мы передадим generated_query, но не передадим existing_request_id.
+            
+            # Добавляем в кэш (в память), чтобы в следующий раз найти
+            # Примечание: реальный ID создастся при логировании, но для кэша нам пока хватит текста.
+            # Чтобы кэш был точным, лучше сохранить запрос в БД сразу здесь или передать текст в логгер.
+            # Оставим логику сохранения в логгере для атомарности.
+            
+            # ВАЖНО: Чтобы кэш работал корректно, нам нужно знать request_id ПОСЛЕ сохранения.
+            # Но _log_interaction_sync асинхронный/внутренний. 
+            # Проще сохранить в БД ЗДЕСЬ, если это новый запрос.
+            
+            new_req_id = self._save_1c_query_to_db(query_text)
+            if new_req_id:
+                self.semantic_cache.add(user_question, query_text, new_req_id)
+                request_id = new_req_id # Сохраняем для логирования ниже
+
+        # === ШАГ 2: Выполнение 1C-запроса (общее для кэша и LLM) ===
         for attempt in range(self.max_retries):
-            success, result = self._execute_1c_query(query)
+            success, result = self._execute_1c_query(query_text)
             
             if success:
                 answer = self._generate_user_response(user_question, result)
                 self._send(chat_id, answer)
-                # Логируем сообщение пользователя + успешный 1C-запрос
+                
+                # Логируем сообщение пользователя.
+                # Если был кэш -> request_id уже известен (передаем в existing_request_id).
+                # Если был новый -> request_id уже известен (передаем в existing_request_id).
                 self._log_interaction_sync(
                     user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question,  # ← Сообщение пользователя
-                    generated_query=generated_query,
+                    user_question=user_question, 
+                    existing_request_id=request_id, # <-- Ключевой момент
                     success=True
                 )
                 return
             else:
                 logger.warning(f"Попытка #{attempt + 1} не удалась: {result}")
                 error_text = result
+                
                 if attempt < self.max_retries - 1:
-                    query = self._generate_1c_query(
+                    # При ошибке выполнения пытаемся перегенерировать
+                    # Это будет уже ДРУГОЙ запрос, его нужно сохранить как новый
+                    new_query = self._generate_1c_query(
                         user_question,
-                        error_context={'last_query': last_query, 'error_text': result}
+                        error_context={'last_query': query_text, 'error_text': result}
                     )
-                    if query:
-                        last_query = query
-                        generated_query = query
+                    if new_query:
+                        query_text = new_query
+                        # Сохраняем исправленный запрос как НОВЫЙ в БД
+                        new_req_id = self._save_1c_query_to_db(query_text)
+                        if new_req_id:
+                             self.semantic_cache.add(user_question, query_text, new_req_id)
+                             request_id = new_req_id
                         continue
                 
                 answer = f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}."
                 self._send(chat_id, answer)
-                # Логируем сообщение пользователя + последний сгенерированный запрос (даже с ошибкой)
+                
                 self._log_interaction_sync(
                     user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question,  # ← Сообщение пользователя
-                    generated_query=generated_query,
+                    user_question=user_question, 
+                    existing_request_id=request_id,
                     success=False, error_text=error_text
                 )
                 return
