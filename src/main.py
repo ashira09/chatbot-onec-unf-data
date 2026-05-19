@@ -1,21 +1,24 @@
 import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Tuple, List, Dict
 import sys
 import re
 from openai import OpenAI
 import requests
 import json
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
 try: 
     from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_TOKEN, BOT_WORK_POSITION
-    from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VECTOR_STORE_TOKEN
+    from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VAL_FILE_TOKEN, VECTOR_STORE_TOKEN, VAL_VECTOR_STORE_TOKEN, PATH_TO_SYNTAX
     from src.onec.integration.http_request import executeQuery
+    from src.yandex_cloud.integration.hybrid_retrieval import HybridRetriever
+    from src.yandex_cloud.integration.query_validator import QueryValidator
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
-    from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes
+    from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes, convert_1c_to_documents, convert_syntax_to_jsonl_bytes
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
 except Exception as e:
     logger.error(e)
@@ -37,6 +40,15 @@ class ChatBot:
         self.offset = 0
         self.running = True
 
+        self.hybrid_retriever = HybridRetriever(
+            dense_weight=0.7,
+            sparse_weight=0.3,
+            top_k_hybrid=20,
+            top_k_final=2
+        )
+        documents = self._load_documents_for_indexing()
+        self.hybrid_retriever.index_documents(documents)
+
         self.iam_token = create_iam_token(OAUTH_TOKEN)['iamToken']
         self.llm_client = OpenAI(
             api_key=self.iam_token,
@@ -54,9 +66,38 @@ class ChatBot:
             self.vector_store = create_search_index(self.llm_client, [FILE_TOKEN], VECTOR_STORE_TOKEN)
         else:
             self.vector_store = vector_stores[0]
+        files = [file for file in self.llm_client.files.list().data if file.filename.split('.')[0] == VAL_FILE_TOKEN]
+        if (len(files) == 0):
+            jsonl_stream = convert_syntax_to_jsonl_bytes(Path(PATH_TO_SYNTAX))
+            self.file = load_chunks(self.llm_client, jsonl_stream, VAL_FILE_TOKEN)
+        else:
+            self.file = files[0]
+        vector_stores = [vector_store for vector_store in self.llm_client.vector_stores.list().data if vector_store.name == VAL_VECTOR_STORE_TOKEN]
+        if (len(vector_stores) == 0):
+            self.val_vector_store = create_search_index(self.llm_client, [VAL_FILE_TOKEN], VAL_VECTOR_STORE_TOKEN)
+        else:
+            self.val_vector_store = vector_stores[0]
         self.max_retries = 3
         self.llm_temperature = 0.3
         self.max_output_tokens = 500
+
+        self.query_validator = QueryValidator(
+            llm_client=self.llm_client,
+            vector_store_id=None,  # или отдельный syntax_vector_store
+            folder_id=FOLDER_ID,
+            model=MODEL,
+            syntax_vector_store_id=self.val_vector_store.id,  # можно создать отдельный индекс для синтаксиса
+            top_k=5,
+            min_relevance_score=0.6
+        )
+
+    def _load_documents_for_indexing(self) -> list:
+        """Загружает документы из 1С для индексации в гибридном ретривере."""
+        try:
+            return convert_1c_to_documents()
+        except Exception as e:
+            logger.error(f"Ошибка загрузки документов для индексации: {e}")
+            return []
 
     def _req(self, method: str, payload: dict) -> Optional[dict]:
         try:
@@ -81,11 +122,10 @@ class ChatBot:
             instructions = (
                 "Ты — ассистент для генерации запросов к 1С:УНФ на языке запросов 1С.\n\n"
                 "ПРАВИЛА:\n"
-                "1. Используй ТОЛЬКО таблицы и поля, которые явно указаны в подключенном индексе.\n"
-                "2. Если нужная таблица или поле не найдены в контексте — верни: \"ОШИБКА: таблица/поле не найдено в индексе\".\n"
-                "3. Никогда не придумывай имена таблиц, полей или алиасы, которых нет в контексте.\n"
-                "4. Не добавляй пояснения, markdown, кавычки — только чистый текст запроса 1С.\n"
-                "5. Перед генерацией запроса мысленно проверь: существует ли указанная таблица в подключенном индексе?\n\n"
+                "1. Если нужная таблица или поле не найдены в контексте — верни: \"ОШИБКА: таблица/поле не найдено в индексе\".\n"
+                "2. Никогда не придумывай имена таблиц, полей или алиасы, которых нет в контексте.\n"
+                "3. Не добавляй пояснения, markdown, кавычки — только чистый текст запроса 1С.\n"
+                "4. Перед генерацией запроса мысленно проверь: существует ли указанная таблица в подключенном индексе?\n\n"
             )
             
             if error_context:
@@ -98,27 +138,97 @@ class ChatBot:
             else:
                 user_input = user_question
 
+            # === Гибридный поиск с кросс-энкодерным ранжированием ===
+            # 1. Получаем плотные результаты из штатного file_search
+            # Примечание: текущий API Yandex Cloud не возвращает scores напрямую,
+            # поэтому используем эвристику или извлекаем из метаданных
+            response_with_search = self.llm_client.responses.create(
+                model=f"gpt://{FOLDER_ID}/{MODEL}",
+                temperature=self.llm_temperature,
+                max_output_tokens=50,  # минимальный вывод, т.к. нам нужны только retrieval results
+                instructions="Найди релевантные таблицы и поля для запроса к 1С. Не генерируй сам запрос.",
+                tools=[{
+                    "type": "file_search",
+                    "vector_store_ids": [self.vector_store.id],
+                    "max_num_results": self.hybrid_retriever.top_k_hybrid
+                }],
+                input=user_question,
+            )
+            
+            # 2. Извлекаем документы из ответа (адаптируйте под формат ответа Yandex Cloud)
+            # Если API не возвращает документы явно — можно сделать отдельный вызов к векторному хранилищу
+            # Здесь предполагается, что у вас есть метод получения результатов поиска
+            dense_docs, dense_scores = self._fetch_vector_search_results(user_question, top_k=20)
+            
+            # 3. Применяем гибридный поиск + кросс-энкодер
+            reranked_docs = self.hybrid_retriever.search(
+                query=user_question,
+                dense_results=dense_docs,
+                dense_scores=dense_scores
+            )
+            
+            # 4. Формируем контекст из reranked документов
+            context_parts = []
+            for doc in reranked_docs:
+                content = doc.get("content", "")
+                metadata = {k: v for k, v in doc.items() if k not in ["content", "id"]}
+                context_parts.append(f"[METADATA] {metadata}\n[CONTENT] {content}")
+            retrieval_context = "\n\n".join(context_parts) if context_parts else "Контекст не найден."
+
+            # 5. Генерируем финальный запрос с улучшенным контекстом
             response = self.llm_client.responses.create(
                 model=f"gpt://{FOLDER_ID}/{MODEL}",
                 temperature=self.llm_temperature,
                 max_output_tokens=self.max_output_tokens,
-                instructions=instructions,
-                tools=[{
-                    "type": "file_search",
-                    "vector_store_ids": [self.vector_store.id],
-                    "max_num_results": 2
-                }],
+                instructions=instructions + f"\n\nРЕЛЕВАНТНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ:\n{retrieval_context}",
                 input=user_input,
+                # tools больше не нужны — контекст уже внедрён вручную
             )
             
             query = response.output_text.strip()
             query = re.sub(r'^```(?:1c|sql)?\s*', '', query, flags=re.IGNORECASE)
             query = re.sub(r'\s*```$', '', query)
-            return query.strip()
+            query = query.strip()
+
+            # === Валидация сгенерированного запроса ===
+            if query and not query.startswith("ОШИБКА:"):
+                is_valid, validation_msg = self.query_validator.validate_query(
+                    query, 
+                    context_tables=None  # можно передать список таблиц из retrieval_context
+                )
+                if not is_valid:
+                    logger.warning(f"Запрос не прошёл валидацию: {validation_msg}")
+                    # Можно либо вернуть ошибку, либо попытаться исправить:
+                    return f"ОШИБКА: {validation_msg}"
+
+            return query
             
         except Exception as e:
             logger.exception(f"LLM query generation error: {e}")
             return None
+
+    def _fetch_vector_search_results(self, query: str, top_k: int = 20) -> Tuple[List[Dict], List[float]]:
+        """
+        Получает результаты плотного поиска из векторного хранилища.
+        Адаптируйте под доступный API Yandex Cloud.
+        """
+        try:
+            # Если Yandex Cloud API поддерживает прямой поиск по векторному хранилищу:
+            search_result = self.llm_client.vector_stores.search(
+                vector_store_id=self.vector_store.id,
+                query=query,
+                max_num_results=top_k
+            )
+            docs = [{"id": r.file_id, "content": r.content} for r in search_result.data]
+            scores = [r.score for r in search_result.data]
+            return docs, scores
+            
+            # Заглушка: возвращаем эвристические оценки
+            # В реальной реализации замените на вызов API
+            # return [], []
+        except Exception as e:
+            logger.error(f"Ошибка поиска в векторном хранилище: {e}")
+            return [], []
 
     def _execute_1c_query(self, query: str) -> tuple[bool, any]:
         """Выполняет запрос в 1С и возвращает (успех, результат/ошибка)"""
@@ -193,7 +303,7 @@ class ChatBot:
                         last_query = query
                         continue
                 # Лимит попыток исчерпан
-                self._send(chat_id, f"Не удалось выполнить запрос после {self.max_retries} попыток.\nПоследняя ошибка: {result}\n\nПопробуйте уточнить вопрос, {user_name}.")
+                self._send(chat_id, f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}.")
                 return
 
     def _handle(self, evt_type: str, data: dict):
@@ -210,7 +320,7 @@ class ChatBot:
             if text.lower() in ['привет', 'здравствуй', 'hello', 'hi']:
                 self._send(chat_id, f'Привет, {name}!')
             elif text == '/help':
-                self._send(chat_id, 'Команды:\n• /help — справка')
+                self._send(chat_id, 'Чат-бот предназначен для извлечения данных из 1С:УНФ. Напишите, какие данные вас интересуют и я постараюсь предоставить их вам.')
             else:
                 asyncio.create_task(
                     asyncio.to_thread(self._process_user_message, chat_id, text, name)
