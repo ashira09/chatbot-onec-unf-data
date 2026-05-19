@@ -313,19 +313,6 @@ class ChatBot:
                 )
             else:
                 user_input = user_question
-
-            response_with_search = self.llm_client.responses.create(
-                model=f"gpt://{FOLDER_ID}/{MODEL}",
-                temperature=self.llm_temperature,
-                max_output_tokens=50,
-                instructions="Найди релевантные таблицы и поля для запроса к 1С. Не генерируй сам запрос.",
-                tools=[{
-                    "type": "file_search",
-                    "vector_store_ids": [self.vector_store.id],
-                    "max_num_results": self.hybrid_retriever.top_k_hybrid
-                }],
-                input=user_question,
-            )
             
             dense_docs, dense_scores = self._fetch_vector_search_results(user_question, top_k=20)
             reranked_docs = self.hybrid_retriever.search(
