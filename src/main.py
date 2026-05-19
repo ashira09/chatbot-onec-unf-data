@@ -7,11 +7,14 @@ from openai import OpenAI
 import requests
 import json
 from pathlib import Path
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO, handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-try: 
+try:
+    from src.database.database import get_db, create_tables, SessionLocal
+    from src.database.models import BitrixChat, BitrixUser, ChatUser, Request, Message
     from src.bitrix.load import WEBHOOK, BOT_CODE, BOT_NAME, BOT_TOKEN, BOT_WORK_POSITION
     from src.yandex_cloud.load import OAUTH_TOKEN, BASE_URL, FOLDER_ID, MODEL, FILE_TOKEN, VAL_FILE_TOKEN, VECTOR_STORE_TOKEN, VAL_VECTOR_STORE_TOKEN, PATH_TO_SYNTAX
     from src.onec.integration.http_request import executeQuery
@@ -20,6 +23,7 @@ try:
     from src.yandex_cloud.integration.auth import create_iam_token, revoke_iam_token
     from src.yandex_cloud.integration.vector_store import delete_chunks, load_chunks, delete_search_index, create_search_index, convert_1c_to_jsonl_bytes, convert_1c_to_documents, convert_syntax_to_jsonl_bytes
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
+    from src.onec.load import ONEC_CONF_PASSWORD, ONEC_CONF_USER
 except Exception as e:
     logger.error(e)
     sys.exit()
@@ -83,10 +87,10 @@ class ChatBot:
 
         self.query_validator = QueryValidator(
             llm_client=self.llm_client,
-            vector_store_id=None,  # или отдельный syntax_vector_store
+            vector_store_id=None,
             folder_id=FOLDER_ID,
             model=MODEL,
-            syntax_vector_store_id=self.val_vector_store.id,  # можно создать отдельный индекс для синтаксиса
+            syntax_vector_store_id=self.val_vector_store.id,
             top_k=5,
             min_relevance_score=0.6
         )
@@ -116,7 +120,171 @@ class ChatBot:
         })
         return bool(res and 'error' not in res)
 
-    def _generate_1c_query(self, user_question: str, error_context: Optional[str] = None) -> Optional[str]:
+    # ==================== МЕТОДЫ РАБОТЫ С БАЗОЙ ДАННЫХ ====================
+    
+    def _ensure_user_in_db(self, user_id: int, user_name: str) -> Optional[BitrixUser]:
+        """Гарантирует наличие пользователя в БД, создаёт если нет"""
+        db = SessionLocal()
+        try:
+            user = db.query(BitrixUser).filter(BitrixUser.user_id == user_id).first()
+            if not user:
+                user = BitrixUser(
+                    user_id=user_id,
+                    user_name=user_name,
+                    onec_login=ONEC_CONF_USER,
+                    onec_password=ONEC_CONF_PASSWORD
+                )
+                db.add(user)
+                db.commit()
+                db.refresh(user)
+                logger.info(f"Пользователь {user_name} (ID: {user_id}) добавлен в БД")
+            elif user.user_name != user_name:
+                user.user_name = user_name
+                db.commit()
+            return user
+        except Exception as e:
+            logger.error(f"Ошибка сохранения пользователя в БД: {e}")
+            db.rollback()
+            return None
+        finally:
+            db.close()
+
+    def _ensure_chat_in_db(self, chat_id: str, chat_name: Optional[str] = None) -> Optional[BitrixChat]:
+        """Гарантирует наличие чата в БД, создаёт если нет"""
+        db = SessionLocal()
+        try:
+            chat = db.query(BitrixChat).filter(BitrixChat.chat_id == chat_id).first()
+            if not chat:
+                chat = BitrixChat(
+                    chat_id=chat_id,
+                    chat_name=chat_name or f"Chat_{chat_id}"
+                )
+                db.add(chat)
+                db.commit()
+                db.refresh(chat)
+                logger.info(f"Чат {chat_id} добавлен в БД")
+            return chat
+        except Exception as e:
+            logger.error(f"Ошибка сохранения чата в БД: {e}")
+            db.rollback()
+            return None
+        finally:
+            db.close()
+
+    def _save_1c_query_to_db(self, query_text: str) -> Optional[int]:
+        """Сохраняет сгенерированный 1C SQL-запрос и возвращает его ID"""
+        if not query_text:
+            return None
+            
+        db = SessionLocal()
+        try:
+            request = Request(request_text=query_text)
+            db.add(request)
+            db.commit()
+            db.refresh(request)
+            logger.debug(f"1C-запрос сохранён в БД (request_id={request.request_id})")
+            return request.request_id
+        except Exception as e:
+            logger.error(f"Ошибка сохранения 1C-запроса в БД: {e}")
+            db.rollback()
+            return None
+        finally:
+            db.close()
+
+    def _save_message_to_db(self, user_id: int, chat_id: str, user_message: str, 
+                        request_id: Optional[int] = None):
+        """
+        Сохраняет СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ и обновляет статистику ChatUser.
+        
+        Args:
+            user_id: ID пользователя
+            chat_id: ID чата
+            user_message: Текст сообщения ОТ ПОЛЬЗОВАТЕЛЯ
+            request_id: ID сгенерированного 1C-запроса (может быть None)
+        """
+        db = SessionLocal()
+        try:
+            # Создаём сообщение с текстом пользователя
+            message = Message(
+                user_id=user_id,
+                chat_id=chat_id,
+                request_id=request_id,  # Может быть None!
+                message_text=user_message,  # ← Теперь это сообщение пользователя!
+                message_date=datetime.utcnow()
+            )
+            db.add(message)
+            
+            # Обновляем статистику ChatUser
+            chat_user = db.query(ChatUser).filter(
+                ChatUser.user_id == user_id,
+                ChatUser.chat_id == chat_id
+            ).first()
+            
+            if chat_user:
+                chat_user.message_cnt += 1
+                chat_user.token_volume += len(user_message)
+            else:
+                chat_user = ChatUser(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    message_cnt=1,
+                    token_volume=len(user_message)
+                )
+                db.add(chat_user)
+            
+            db.commit()
+            logger.debug(f"Сообщение пользователя сохранено в БД (request_id={request_id})")
+            
+        except Exception as e:
+            logger.error(f"Ошибка сохранения сообщения в БД: {e}")
+            db.rollback()
+        finally:
+            db.close()
+
+    def _log_interaction_async(self, user_id: int, chat_id: str, user_name: str,
+                              user_question: str, generated_query: Optional[str],
+                              response: str, success: bool, error_text: Optional[str] = None):
+        """Асинхронная обёртка для логирования взаимодействия"""
+        asyncio.create_task(asyncio.to_thread(
+            self._log_interaction_sync,
+            user_id, chat_id, user_name, user_question,
+            generated_query, response, success, error_text
+        ))
+
+    def _log_interaction_sync(self, user_id: int, chat_id: str, user_name: str,
+                            user_question: str, generated_query: Optional[str],
+                            success: bool, error_text: Optional[str] = None):
+        """
+        Сохраняет сообщение пользователя и (опционально) связанный 1C-запрос.
+        
+        Логика:
+        - user_question → сохраняется в message (всегда)
+        - generated_query → сохраняется в request (если есть), связывается через request_id
+        """
+        # 1. Гарантируем наличие пользователя и чата
+        user = self._ensure_user_in_db(user_id, user_name)
+        chat = self._ensure_chat_in_db(chat_id)
+        
+        if not user or not chat:
+            logger.warning("Не удалось сохранить взаимодействие: пользователь или чат не найдены")
+            return
+        
+        # 2. Если есть сгенерированный 1C-запрос → сохраняем его в request
+        request_id = None
+        if generated_query and not generated_query.startswith("ОШИБКА:"):
+            request_id = self._save_1c_query_to_db(generated_query)
+        
+        # 3. Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ (с привязкой к 1C-запросу или NULL)
+        self._save_message_to_db(
+            user_id=user_id,
+            chat_id=chat_id,
+            user_message=user_question,  # ← Сообщение пользователя!
+            request_id=request_id
+        )
+
+    # ==================== ОСНОВНАЯ ЛОГИКА ====================
+
+    def _generate_1c_query(self, user_question: str, error_context: Optional[dict] = None) -> Optional[str]:
         """Генерирует запрос к 1С на основе вопроса пользователя и контекста ошибки (если есть)"""
         try:
             instructions = (
@@ -138,14 +306,10 @@ class ChatBot:
             else:
                 user_input = user_question
 
-            # === Гибридный поиск с кросс-энкодерным ранжированием ===
-            # 1. Получаем плотные результаты из штатного file_search
-            # Примечание: текущий API Yandex Cloud не возвращает scores напрямую,
-            # поэтому используем эвристику или извлекаем из метаданных
             response_with_search = self.llm_client.responses.create(
                 model=f"gpt://{FOLDER_ID}/{MODEL}",
                 temperature=self.llm_temperature,
-                max_output_tokens=50,  # минимальный вывод, т.к. нам нужны только retrieval results
+                max_output_tokens=50,
                 instructions="Найди релевантные таблицы и поля для запроса к 1С. Не генерируй сам запрос.",
                 tools=[{
                     "type": "file_search",
@@ -155,19 +319,13 @@ class ChatBot:
                 input=user_question,
             )
             
-            # 2. Извлекаем документы из ответа (адаптируйте под формат ответа Yandex Cloud)
-            # Если API не возвращает документы явно — можно сделать отдельный вызов к векторному хранилищу
-            # Здесь предполагается, что у вас есть метод получения результатов поиска
             dense_docs, dense_scores = self._fetch_vector_search_results(user_question, top_k=20)
-            
-            # 3. Применяем гибридный поиск + кросс-энкодер
             reranked_docs = self.hybrid_retriever.search(
                 query=user_question,
                 dense_results=dense_docs,
                 dense_scores=dense_scores
             )
             
-            # 4. Формируем контекст из reranked документов
             context_parts = []
             for doc in reranked_docs:
                 content = doc.get("content", "")
@@ -175,14 +333,12 @@ class ChatBot:
                 context_parts.append(f"[METADATA] {metadata}\n[CONTENT] {content}")
             retrieval_context = "\n\n".join(context_parts) if context_parts else "Контекст не найден."
 
-            # 5. Генерируем финальный запрос с улучшенным контекстом
             response = self.llm_client.responses.create(
                 model=f"gpt://{FOLDER_ID}/{MODEL}",
                 temperature=self.llm_temperature,
                 max_output_tokens=self.max_output_tokens,
                 instructions=instructions + f"\n\nРЕЛЕВАНТНЫЙ КОНТЕКСТ ИЗ БАЗЫ ЗНАНИЙ:\n{retrieval_context}",
                 input=user_input,
-                # tools больше не нужны — контекст уже внедрён вручную
             )
             
             query = response.output_text.strip()
@@ -190,15 +346,13 @@ class ChatBot:
             query = re.sub(r'\s*```$', '', query)
             query = query.strip()
 
-            # === Валидация сгенерированного запроса ===
             if query and not query.startswith("ОШИБКА:"):
                 is_valid, validation_msg = self.query_validator.validate_query(
                     query, 
-                    context_tables=None  # можно передать список таблиц из retrieval_context
+                    context_tables=None
                 )
                 if not is_valid:
                     logger.warning(f"Запрос не прошёл валидацию: {validation_msg}")
-                    # Можно либо вернуть ошибку, либо попытаться исправить:
                     return f"ОШИБКА: {validation_msg}"
 
             return query
@@ -208,12 +362,8 @@ class ChatBot:
             return None
 
     def _fetch_vector_search_results(self, query: str, top_k: int = 20) -> Tuple[List[Dict], List[float]]:
-        """
-        Получает результаты плотного поиска из векторного хранилища.
-        Адаптируйте под доступный API Yandex Cloud.
-        """
+        """Получает результаты плотного поиска из векторного хранилища."""
         try:
-            # Если Yandex Cloud API поддерживает прямой поиск по векторному хранилищу:
             search_result = self.llm_client.vector_stores.search(
                 vector_store_id=self.vector_store.id,
                 query=query,
@@ -222,10 +372,6 @@ class ChatBot:
             docs = [{"id": r.file_id, "content": r.content} for r in search_result.data]
             scores = [r.score for r in search_result.data]
             return docs, scores
-            
-            # Заглушка: возвращаем эвристические оценки
-            # В реальной реализации замените на вызов API
-            # return [], []
         except Exception as e:
             logger.error(f"Ошибка поиска в векторном хранилище: {e}")
             return [], []
@@ -241,7 +387,6 @@ class ChatBot:
                 elif 'data' in result:
                     return True, result['data']
             return True, result
-            
         except Exception as e:
             logger.exception(f"1C execution error: {e}")
             return False, str(e)
@@ -277,11 +422,27 @@ class ChatBot:
             logger.exception(f"LLM response generation error: {e}")
             return f"Данные получены:\n{json.dumps(data, ensure_ascii=False, indent=2)}"
 
-    def _process_user_message(self, chat_id: str, user_question: str, user_name: str):
-        """Основная логика обработки: вопрос → LLM → 1C → LLM → ответ пользователю"""
+    def _process_user_message(self, chat_id: str, user_question: str, user_name: str, user_id: int):
+        """
+        Основная логика: вопрос пользователя → генерация 1C-запроса → выполнение → ответ.
+        В БД сохраняется ТОЛЬКО сообщение пользователя (и опционально 1C-запрос).
+        """
+        generated_query = None
+        
+        # Генерируем запрос к 1С
         query = self._generate_1c_query(user_question)
+        generated_query = query
+        
         if not query:
-            self._send(chat_id, f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}.")
+            answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
+            self._send(chat_id, answer)
+            # Логируем сообщение пользователя (без 1C-запроса)
+            self._log_interaction_sync(
+                user_id=user_id, chat_id=chat_id, user_name=user_name,
+                user_question=user_question,  # ← Сообщение пользователя
+                generated_query=None,
+                success=False, error_text="Query generation failed"
+            )
             return
 
         last_query = query
@@ -291,9 +452,17 @@ class ChatBot:
             if success:
                 answer = self._generate_user_response(user_question, result)
                 self._send(chat_id, answer)
+                # Логируем сообщение пользователя + успешный 1C-запрос
+                self._log_interaction_sync(
+                    user_id=user_id, chat_id=chat_id, user_name=user_name,
+                    user_question=user_question,  # ← Сообщение пользователя
+                    generated_query=generated_query,
+                    success=True
+                )
                 return
             else:
                 logger.warning(f"Попытка #{attempt + 1} не удалась: {result}")
+                error_text = result
                 if attempt < self.max_retries - 1:
                     query = self._generate_1c_query(
                         user_question,
@@ -301,9 +470,18 @@ class ChatBot:
                     )
                     if query:
                         last_query = query
+                        generated_query = query
                         continue
-                # Лимит попыток исчерпан
-                self._send(chat_id, f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}.")
+                
+                answer = f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}."
+                self._send(chat_id, answer)
+                # Логируем сообщение пользователя + последний сгенерированный запрос (даже с ошибкой)
+                self._log_interaction_sync(
+                    user_id=user_id, chat_id=chat_id, user_name=user_name,
+                    user_question=user_question,  # ← Сообщение пользователя
+                    generated_query=generated_query,
+                    success=False, error_text=error_text
+                )
                 return
 
     def _handle(self, evt_type: str, data: dict):
@@ -312,21 +490,55 @@ class ChatBot:
             msg = data.get('message', {})
             user = data.get('user', {})
             chat = data.get('chat', {})
-            text = msg.get('text', '').strip()
+            text = msg.get('text', '').strip()  # ← Это сообщение пользователя!
             name = user.get('name', 'Пользователь')
             chat_id = chat.get('dialogId')
+            user_id = user.get('id') or user.get('userId') or user.get('user_id')
+            
+            if not user_id:
+                user_id = hash(f"{name}_{chat_id}") % (10**18)
+                logger.warning(f"user_id не найден, сгенерирован временный: {user_id}")
+            
             logger.info(f"Пользователь написал: '{text}'.")
 
             if text.lower() in ['привет', 'здравствуй', 'hello', 'hi']:
-                self._send(chat_id, f'Привет, {name}!')
+                answer = f'Привет, {name}!'
+                self._send(chat_id, answer)
+                # Логируем сообщение пользователя ("привет")
+                asyncio.create_task(asyncio.to_thread(
+                    self._log_simple_message, user_id, chat_id, name, text, answer  # text = user message
+                ))
             elif text == '/help':
-                self._send(chat_id, 'Чат-бот предназначен для извлечения данных из 1С:УНФ. Напишите, какие данные вас интересуют и я постараюсь предоставить их вам.')
+                answer = 'Чат-бот предназначен для извлечения данных из 1С:УНФ. Напишите, какие данные вас интересуют и я постараюсь предоставить их вам.'
+                self._send(chat_id, answer)
+                # Логируем сообщение пользователя ("/help")
+                asyncio.create_task(asyncio.to_thread(
+                    self._log_simple_message, user_id, chat_id, name, text, answer  # text = user message
+                ))
             else:
+                # Основной поток: передаём сообщение пользователя в обработку
                 asyncio.create_task(
-                    asyncio.to_thread(self._process_user_message, chat_id, text, name)
+                    asyncio.to_thread(self._process_user_message, chat_id, text, name, user_id)  # text = user message
                 )
         elif evt_type == 'ONIMBOTV2DELETE':
             self.running = False
+
+    def _log_simple_message(self, user_id: int, chat_id: str, user_name: str, 
+                        user_message: str, answer: str):
+        """
+        Логирование системных сообщений (приветствие, /help).
+        Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ, request_id = NULL.
+        """
+        self._ensure_user_in_db(user_id, user_name)
+        self._ensure_chat_in_db(chat_id)
+        # Сохраняем сообщение пользователя, без привязки к 1C-запросу
+        self._save_message_to_db(
+            user_id=user_id, 
+            chat_id=chat_id, 
+            user_message=user_message,  # ← Сообщение пользователя ("привет", "/help")
+            request_id=None
+        )
+        # Ответ бота НЕ сохраняем в БД
 
     async def poll(self):
         logger.info(f"Бот запущен.")
@@ -347,6 +559,7 @@ class ChatBot:
             await asyncio.sleep(2 if res.get('result', {}).get('hasMore') else 10)
 
 async def main():
+    create_tables()
     bot = ChatBot(BOT_TOKEN, WEBHOOK)
     try:
         await bot.poll()
