@@ -164,34 +164,6 @@ class ChatBot:
         })
         return bool(res and 'error' not in res)
 
-    # ==================== МЕТОДЫ РАБОТЫ С БАЗОЙ ДАННЫХ ====================
-
-    def _log_interaction_async(
-        self, 
-        user_id: int, 
-        chat_id: str, 
-        user_name: str,
-        user_question: str, 
-        generated_query: Optional[str] = None,
-        existing_request_id: Optional[int] = None,
-        success: bool = True, 
-        error_text: Optional[str] = None
-    ):
-        """Асинхронная обёртка для логирования взаимодействия"""
-        asyncio.create_task(asyncio.to_thread(
-            log_user_interaction,  # <-- Прямой вызов функции из crud
-            user_id=user_id,
-            chat_id=chat_id,
-            user_name=user_name,
-            user_question=user_question,
-            generated_query=generated_query,
-            existing_request_id=existing_request_id,
-            success=success,
-            error_text=error_text,
-            onec_login=ONEC_CONF_USER,
-            onec_password=ONEC_CONF_PASSWORD
-        ))
-
     # ==================== ОСНОВНАЯ ЛОГИКА ====================
 
     def _execute_1c_query(self, query: str) -> tuple[bool, any]:
@@ -268,10 +240,16 @@ class ChatBot:
                 answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
                 self._send(chat_id, answer)
                 # Передаем None вместо request_id -> сообщение сохранится без привязки
-                self._log_interaction_sync(
-                    user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question, generated_query=None,
-                    success=False, error_text="Query generation failed"
+                log_user_interaction(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                    user_question=user_question,
+                    generated_query=query_text if request_id else None,
+                    existing_request_id=request_id,
+                    success=True,
+                    onec_login=ONEC_CONF_USER,
+                    onec_password=ONEC_CONF_PASSWORD
                 )
                 return
 
@@ -280,10 +258,16 @@ class ChatBot:
             if not is_valid:
                 answer = f"Запрос не прошёл валидацию: {validation_msg}"
                 self._send(chat_id, answer)
-                self._log_interaction_sync(
-                    user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question, generated_query=None,
-                    success=False, error_text=validation_msg
+                log_user_interaction(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                    user_question=user_question,
+                    generated_query=query_text if request_id else None,
+                    existing_request_id=request_id,
+                    success=True,
+                    onec_login=ONEC_CONF_USER,
+                    onec_password=ONEC_CONF_PASSWORD
                 )
                 return
 
@@ -315,11 +299,16 @@ class ChatBot:
                 # Логируем сообщение пользователя.
                 # Если был кэш -> request_id уже известен (передаем в existing_request_id).
                 # Если был новый -> request_id уже известен (передаем в existing_request_id).
-                self._log_interaction_sync(
-                    user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question, 
-                    existing_request_id=request_id, # <-- Ключевой момент
-                    success=True
+                log_user_interaction(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                    user_question=user_question,
+                    generated_query=query_text if request_id else None,
+                    existing_request_id=request_id,
+                    success=True,
+                    onec_login=ONEC_CONF_USER,
+                    onec_password=ONEC_CONF_PASSWORD
                 )
                 return
             else:
@@ -336,7 +325,7 @@ class ChatBot:
                     if new_query:
                         query_text = new_query
                         # Сохраняем исправленный запрос как НОВЫЙ в БД
-                        new_req_id = self._save_1c_query_to_db(query_text)
+                        new_req_id = create_1c_query(query_text)
                         if new_req_id:
                              self.semantic_cache.add(user_question, query_text, new_req_id)
                              request_id = new_req_id
@@ -345,11 +334,16 @@ class ChatBot:
                 answer = f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}."
                 self._send(chat_id, answer)
                 
-                self._log_interaction_async(
-                    user_id=user_id, chat_id=chat_id, user_name=user_name,
-                    user_question=user_question, 
+                log_user_interaction(
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    user_name=user_name,
+                    user_question=user_question,
+                    generated_query=query_text if request_id else None,
                     existing_request_id=request_id,
-                    success=True
+                    success=True,
+                    onec_login=ONEC_CONF_USER,
+                    onec_password=ONEC_CONF_PASSWORD
                 )
                 return
 
