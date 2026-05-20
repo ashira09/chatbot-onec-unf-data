@@ -94,9 +94,9 @@ class HybridRetriever:
         
         # 6. Кросс-энкодерное ранжирование (без изменений)
         if not top_hybrid:
-            return []
-            
-        pairs = [[query, doc.get("content", "")] for doc, _ in top_hybrid]
+            return []  
+        pairs = [(query, doc.get("content", "")[0].text) for doc, _ in top_hybrid]
+ 
         try:
             ce_scores = self.cross_encoder.predict(pairs)
         except Exception as e:
