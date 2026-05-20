@@ -1,6 +1,6 @@
 import requests
 
-def fetch_message(webhook, bot_id, bot_token, limit):
+def fetch_message(webhook, bot_id, bot_token, limit, offset):
     url = webhook + 'imbot.v2.Event.get'
     headers = {
         'Content-Type': 'application/json'
@@ -8,7 +8,8 @@ def fetch_message(webhook, bot_id, bot_token, limit):
     payload = {
         "botId": int(bot_id),
         "botToken": bot_token,
-        "limit": limit
+        "limit": limit,
+        "offset": offset
     }
 
     response = requests.post(url, headers=headers, json=payload)
