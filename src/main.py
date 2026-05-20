@@ -26,6 +26,14 @@ try:
     from src.yandex_cloud.integration.query_generator import QueryGenerator
     from src.bitrix.integration.auth import bot_register, bot_unregister, get_bot_list
     from src.onec.load import ONEC_CONF_PASSWORD, ONEC_CONF_USER
+    from src.database.crud import (
+        get_or_create_user,
+        get_or_create_chat,
+        create_1c_query,
+        create_message,
+        update_chat_user_stats,
+        log_user_interaction
+    )
 except Exception as e:
     logger.error(e)
     sys.exit()
@@ -157,171 +165,32 @@ class ChatBot:
         return bool(res and 'error' not in res)
 
     # ==================== МЕТОДЫ РАБОТЫ С БАЗОЙ ДАННЫХ ====================
-    
-    def _ensure_user_in_db(self, user_id: int, user_name: str) -> Optional[BitrixUser]:
-        """Гарантирует наличие пользователя в БД, создаёт если нет"""
-        db = SessionLocal()
-        try:
-            user = db.query(BitrixUser).filter(BitrixUser.user_id == user_id).first()
-            if not user:
-                user = BitrixUser(
-                    user_id=user_id,
-                    user_name=user_name,
-                    onec_login=ONEC_CONF_USER,
-                    onec_password=ONEC_CONF_PASSWORD
-                )
-                db.add(user)
-                db.commit()
-                db.refresh(user)
-                logger.info(f"Пользователь {user_name} (ID: {user_id}) добавлен в БД")
-            elif user.user_name != user_name:
-                user.user_name = user_name
-                db.commit()
-            return user
-        except Exception as e:
-            logger.error(f"Ошибка сохранения пользователя в БД: {e}")
-            db.rollback()
-            return None
-        finally:
-            db.close()
 
-    def _ensure_chat_in_db(self, chat_id: str, chat_name: Optional[str] = None) -> Optional[BitrixChat]:
-        """Гарантирует наличие чата в БД, создаёт если нет"""
-        db = SessionLocal()
-        try:
-            chat = db.query(BitrixChat).filter(BitrixChat.chat_id == chat_id).first()
-            if not chat:
-                chat = BitrixChat(
-                    chat_id=chat_id,
-                    chat_name=chat_name or f"Chat_{chat_id}"
-                )
-                db.add(chat)
-                db.commit()
-                db.refresh(chat)
-                logger.info(f"Чат {chat_id} добавлен в БД")
-            return chat
-        except Exception as e:
-            logger.error(f"Ошибка сохранения чата в БД: {e}")
-            db.rollback()
-            return None
-        finally:
-            db.close()
-
-    def _save_1c_query_to_db(self, query_text: str) -> Optional[int]:
-        """Сохраняет сгенерированный 1C SQL-запрос и возвращает его ID"""
-        if not query_text:
-            return None
-            
-        db = SessionLocal()
-        try:
-            request = Request(request_text=query_text)
-            db.add(request)
-            db.commit()
-            db.refresh(request)
-            logger.debug(f"1C-запрос сохранён в БД (request_id={request.request_id})")
-            return request.request_id
-        except Exception as e:
-            logger.error(f"Ошибка сохранения 1C-запроса в БД: {e}")
-            db.rollback()
-            return None
-        finally:
-            db.close()
-
-    def _save_message_to_db(self, user_id: int, chat_id: str, user_message: str, 
-                        request_id: Optional[int] = None):
-        """
-        Сохраняет СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ и обновляет статистику ChatUser.
-        
-        Args:
-            user_id: ID пользователя
-            chat_id: ID чата
-            user_message: Текст сообщения ОТ ПОЛЬЗОВАТЕЛЯ
-            request_id: ID сгенерированного 1C-запроса (может быть None)
-        """
-        db = SessionLocal()
-        try:
-            # Создаём сообщение с текстом пользователя
-            message = Message(
-                user_id=user_id,
-                chat_id=chat_id,
-                request_id=request_id,  # Может быть None!
-                message_text=user_message,  # ← Теперь это сообщение пользователя!
-                message_date=datetime.utcnow()
-            )
-            db.add(message)
-            
-            # Обновляем статистику ChatUser
-            chat_user = db.query(ChatUser).filter(
-                ChatUser.user_id == user_id,
-                ChatUser.chat_id == chat_id
-            ).first()
-            
-            if chat_user:
-                chat_user.message_cnt += 1
-                chat_user.token_volume += len(user_message)
-            else:
-                chat_user = ChatUser(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    message_cnt=1,
-                    token_volume=len(user_message)
-                )
-                db.add(chat_user)
-            
-            db.commit()
-            logger.debug(f"Сообщение пользователя сохранено в БД (request_id={request_id})")
-            
-        except Exception as e:
-            logger.error(f"Ошибка сохранения сообщения в БД: {e}")
-            db.rollback()
-        finally:
-            db.close()
-
-    def _log_interaction_async(self, user_id: int, chat_id: str, user_name: str,
-                              user_question: str, generated_query: Optional[str],
-                              response: str, success: bool, error_text: Optional[str] = None):
+    def _log_interaction_async(
+        self, 
+        user_id: int, 
+        chat_id: str, 
+        user_name: str,
+        user_question: str, 
+        generated_query: Optional[str] = None,
+        existing_request_id: Optional[int] = None,
+        success: bool = True, 
+        error_text: Optional[str] = None
+    ):
         """Асинхронная обёртка для логирования взаимодействия"""
         asyncio.create_task(asyncio.to_thread(
-            self._log_interaction_sync,
-            user_id, chat_id, user_name, user_question,
-            generated_query, response, success, error_text
-        ))
-
-    def _log_interaction_sync(self, user_id: int, chat_id: str, user_name: str,
-                             user_question: str, 
-                             generated_query: Optional[str] = None,
-                             existing_request_id: Optional[int] = None,
-                             success: bool = True, error_text: Optional[str] = None):
-        """
-        Сохраняет сообщение пользователя и (опционально) связывает его с 1C-запросом.
-        
-        Логика:
-        1. Если передан existing_request_id -> используем его (кэш).
-        2. Если existing_request_id НЕТ, но есть generated_query -> сохраняем в БД как новый.
-        3. Если ничего нет -> request_id = NULL (приветствия).
-        """
-        # 1. Гарантируем наличие пользователя и чата
-        user = self._ensure_user_in_db(user_id, user_name)
-        chat = self._ensure_chat_in_db(chat_id)
-        
-        if not user or not chat:
-            logger.warning("Не удалось сохранить взаимодействие: пользователь или чат не найдены")
-            return
-        
-        # 2. Определяем final_request_id
-        final_request_id = existing_request_id
-        
-        # Если ID нет, но есть текст запроса — значит это НОВЫЙ запрос, нужно сохранить в БД
-        if final_request_id is None and generated_query and not generated_query.startswith("ОШИБКА:"):
-            final_request_id = self._save_1c_query_to_db(generated_query)
-        
-        # 3. Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ (с привязкой к ID или NULL)
-        self._save_message_to_db(
+            log_user_interaction,  # <-- Прямой вызов функции из crud
             user_id=user_id,
             chat_id=chat_id,
-            user_message=user_question,
-            request_id=final_request_id  # Будет либо ID из кэша, либо новый ID, либо None
-        )
+            user_name=user_name,
+            user_question=user_question,
+            generated_query=generated_query,
+            existing_request_id=existing_request_id,
+            success=success,
+            error_text=error_text,
+            onec_login=ONEC_CONF_USER,
+            onec_password=ONEC_CONF_PASSWORD
+        ))
 
     # ==================== ОСНОВНАЯ ЛОГИКА ====================
 
@@ -430,7 +299,7 @@ class ChatBot:
             # Но _log_interaction_sync асинхронный/внутренний. 
             # Проще сохранить в БД ЗДЕСЬ, если это новый запрос.
             
-            new_req_id = self._save_1c_query_to_db(query_text)
+            new_req_id = create_1c_query(query_text)
             if new_req_id:
                 self.semantic_cache.add(user_question, query_text, new_req_id)
                 request_id = new_req_id # Сохраняем для логирования ниже
@@ -476,11 +345,11 @@ class ChatBot:
                 answer = f"Не удалось ничего найти по вашему запросу. Попробуйте уточнить вопрос, {user_name}."
                 self._send(chat_id, answer)
                 
-                self._log_interaction_sync(
+                self._log_interaction_async(
                     user_id=user_id, chat_id=chat_id, user_name=user_name,
                     user_question=user_question, 
                     existing_request_id=request_id,
-                    success=False, error_text=error_text
+                    success=True
                 )
                 return
 
@@ -524,21 +393,19 @@ class ChatBot:
             self.running = False
 
     def _log_simple_message(self, user_id: int, chat_id: str, user_name: str, 
-                        user_message: str, answer: str):
-        """
-        Логирование системных сообщений (приветствие, /help).
-        Сохраняем СООБЩЕНИЕ ПОЛЬЗОВАТЕЛЯ, request_id = NULL.
-        """
-        self._ensure_user_in_db(user_id, user_name)
-        self._ensure_chat_in_db(chat_id)
-        # Сохраняем сообщение пользователя, без привязки к 1C-запросу
-        self._save_message_to_db(
-            user_id=user_id, 
-            chat_id=chat_id, 
-            user_message=user_message,  # ← Сообщение пользователя ("привет", "/help")
-            request_id=None
+                            user_message: str, answer: str):
+        """Логирование системных сообщений."""
+        log_user_interaction(
+            user_id=user_id,
+            chat_id=chat_id,
+            user_name=user_name,
+            user_question=user_message,
+            generated_query=None,
+            existing_request_id=None,
+            success=True,
+            onec_login=ONEC_CONF_USER,
+            onec_password=ONEC_CONF_PASSWORD
         )
-        # Ответ бота НЕ сохраняем в БД
 
     async def poll(self):
         logger.info(f"Бот запущен.")
