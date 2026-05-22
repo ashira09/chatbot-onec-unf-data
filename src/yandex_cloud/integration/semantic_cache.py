@@ -22,7 +22,7 @@ class SemanticCache:
         self.cache_limit = cache_limit
         
         # Загружаем легкую модель для эмбеддингов
-        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        self.model = SentenceTransformer('sergeyzh/BERTA')
         
         # Кэш в памяти: {user_message_text: (embedding_vector, request_id, query_text)}
         self._cache: Dict[str, Tuple[np.ndarray, int, str]] = {}
