@@ -59,7 +59,7 @@ class ChatBot:
         documents = self._load_documents_for_indexing()
         self.hybrid_retriever.index_documents(documents)
 
-        self.semantic_cache = SemanticCache(threshold=0.85, cache_limit=200)
+        self.semantic_cache = SemanticCache(threshold=0.9, cache_limit=200)
 
         self.iam_token = create_iam_token(OAUTH_TOKEN)['iamToken']
         self.llm_client = OpenAI(
@@ -232,61 +232,65 @@ class ChatBot:
             logger.info("Используем запрос из семантического кэша (без записи в БД).")
         else:
             # === СЦЕНАРИЙ: КЭША НЕТ ===
-            # Генерируем новый запрос
+            # Генерируем новый запрос с циклом повторных попыток при ошибках валидации
             logger.info("Запрос не найден в кэше, генерируем новый...")
-            query_text = self.query_generator.generate(user_question)
             
-            if not query_text or query_text.startswith("ОШИБКА:"):
-                answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
-                self._send(chat_id, answer)
-                # Передаем None вместо request_id -> сообщение сохранится без привязки
-                log_user_interaction(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    user_name=user_name,
-                    user_question=user_question,
-                    generated_query=query_text if request_id else None,
-                    existing_request_id=request_id,
-                    success=True,
-                    onec_login=ONEC_CONF_USER,
-                    onec_password=ONEC_CONF_PASSWORD
-                )
-                return
+            query_text = None
+            last_generated_query = None  # Для передачи в error_context
+            
+            for val_attempt in range(self.max_retries):
+                # Генерируем запрос (валидация происходит внутри generate())
+                query_text = self.query_generator.generate(user_question)
+                
+                # Проверяем результат генерации
+                if not query_text:
+                    answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
+                    self._send(chat_id, answer)
+                    log_user_interaction(
+                        user_id=user_id, chat_id=chat_id, user_name=user_name,
+                        user_question=user_question, generated_query=None,
+                        existing_request_id=None, success=False,
+                        error_text="Query generation failed (empty)",
+                        onec_login=ONEC_CONF_USER, onec_password=ONEC_CONF_PASSWORD
+                    )
+                    return
+                # Если вернулась ошибка валидации — извлекаем сообщение
+                if query_text.startswith("ОШИБКА:"):
+                    validation_msg = query_text.replace("ОШИБКА: ", "", 1)
+                    logger.warning(f"Попытка валидации #{val_attempt + 1} не удалась: {validation_msg}")
+                    
+                    if val_attempt < self.max_retries - 1:
+                        # Передаём ошибку валидации + последний запрос для исправления
+                        last_generated_query = query_text  # Сохраняем для контекста
+                        query_text = self.query_generator.generate(
+                            user_question,
+                            error_context={
+                                'last_query': last_generated_query, 
+                                'error_text': validation_msg
+                            }
+                        )
+                        continue  # Повторяем цикл
+                    else:
+                        # Лимит попыток исчерпан
+                        answer = f"Запрос не прошёл валидацию: {validation_msg}. Попробуйте уточнить вопрос, {user_name}."
+                        self._send(chat_id, answer)
+                        log_user_interaction(
+                            user_id=user_id, chat_id=chat_id, user_name=user_name,
+                            user_question=user_question, generated_query=last_generated_query,
+                            existing_request_id=None, success=False,
+                            error_text=f"Validation failed: {validation_msg}",
+                            onec_login=ONEC_CONF_USER, onec_password=ONEC_CONF_PASSWORD
+                        )
+                        return
+                
+                # ✅ Если дошли сюда — запрос сгенерирован и прошёл валидацию
+                break
 
-            # Валидация
-            is_valid, validation_msg = self.query_validator.validate_query(query_text)
-            if not is_valid:
-                answer = f"Запрос не прошёл валидацию: {validation_msg}"
-                self._send(chat_id, answer)
-                log_user_interaction(
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    user_name=user_name,
-                    user_question=user_question,
-                    generated_query=query_text if request_id else None,
-                    existing_request_id=request_id,
-                    success=True,
-                    onec_login=ONEC_CONF_USER,
-                    onec_password=ONEC_CONF_PASSWORD
-                )
-                return
-
-            # request_id пока None, он создастся внутри _log_interaction_sync автоматически,
-            # так как мы передадим generated_query, но не передадим existing_request_id.
-            
-            # Добавляем в кэш (в память), чтобы в следующий раз найти
-            # Примечание: реальный ID создастся при логировании, но для кэша нам пока хватит текста.
-            # Чтобы кэш был точным, лучше сохранить запрос в БД сразу здесь или передать текст в логгер.
-            # Оставим логику сохранения в логгере для атомарности.
-            
-            # ВАЖНО: Чтобы кэш работал корректно, нам нужно знать request_id ПОСЛЕ сохранения.
-            # Но _log_interaction_sync асинхронный/внутренний. 
-            # Проще сохранить в БД ЗДЕСЬ, если это новый запрос.
-            
+            # === Сохраняем успешный запрос в БД и кэш ===
             new_req_id = create_1c_query(query_text)
             if new_req_id:
                 self.semantic_cache.add(user_question, query_text, new_req_id)
-                request_id = new_req_id # Сохраняем для логирования ниже
+                request_id = new_req_id
 
         # === ШАГ 2: Выполнение 1C-запроса (общее для кэша и LLM) ===
         for attempt in range(self.max_retries):
