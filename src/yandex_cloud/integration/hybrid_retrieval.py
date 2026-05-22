@@ -14,7 +14,7 @@ class HybridRetriever:
         sparse_weight: float = 0.3,
         top_k_hybrid: int = 20,
         top_k_final: int = 2,
-        cross_encoder_model: str = "cointegrated/rubert-tiny2"
+        cross_encoder_model: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     ):
         self.dense_weight = dense_weight
         self.sparse_weight = sparse_weight
