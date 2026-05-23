@@ -74,7 +74,7 @@ class ChatBot:
 
         self.max_retries = 3
         self.llm_temperature = 0.3
-        self.max_output_tokens = 500
+        self.max_output_tokens = 1000
 
         self.query_validator = QueryValidator(
             llm_client=self.llm_client,
@@ -235,13 +235,12 @@ class ChatBot:
             # Генерируем новый запрос с циклом повторных попыток при ошибках валидации
             logger.info("Запрос не найден в кэше, генерируем новый...")
             
-            query_text = None
+            query_text = self.query_generator.generate(user_question)
             last_generated_query = None  # Для передачи в error_context
-            
+
             for val_attempt in range(self.max_retries):
                 # Генерируем запрос (валидация происходит внутри generate())
-                query_text = self.query_generator.generate(user_question)
-                
+                logger.info(f'Запрос: {query_text}')
                 # Проверяем результат генерации
                 if not query_text:
                     answer = f"Не удалось сформировать запрос. Попробуйте перефразировать вопрос, {user_name}."
@@ -286,12 +285,6 @@ class ChatBot:
                 # ✅ Если дошли сюда — запрос сгенерирован и прошёл валидацию
                 break
 
-            # === Сохраняем успешный запрос в БД и кэш ===
-            new_req_id = create_1c_query(query_text)
-            if new_req_id:
-                self.semantic_cache.add(user_question, query_text, new_req_id)
-                request_id = new_req_id
-
         # === ШАГ 2: Выполнение 1C-запроса (общее для кэша и LLM) ===
         for attempt in range(self.max_retries):
             success, result = self._execute_1c_query(query_text)
@@ -314,6 +307,10 @@ class ChatBot:
                     onec_login=ONEC_CONF_USER,
                     onec_password=ONEC_CONF_PASSWORD
                 )
+                new_req_id = create_1c_query(query_text)
+                if new_req_id:
+                    self.semantic_cache.add(user_question, query_text, new_req_id)
+                    request_id = new_req_id
                 return
             else:
                 logger.warning(f"Попытка #{attempt + 1} не удалась: {result}")
