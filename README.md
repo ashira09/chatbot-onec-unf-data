@@ -1,9 +1,24 @@
-**Интеграция с 1С** (конфигурацию опубликована на VPS, можно попробовать без локальной публикации):
-* **Отправить HTTP-запрос к 1С через 1C:UNF** - python/onec/examples/example_http.py;
-* **Отправить WEB-запрос к 1С через 1C:UNF** - python/onec/examples/example_web.py;
-* **Отправить OData-запрос к 1С через 1C:UNF** - python/onec/examples/example_odata.py.
+# Развертывание
+1. Заполните файл .env:
+* ONEC_HOST - адрес опубликованной конфигурации с установленным [расширением](https://github.com/ashira09/onec-unf-ext)
+* ONEC_CONF_USER - логин от учетной записи конфигурации
+* ONEC_CONF_PASSWORD - пароль от учётной записи конфигурации
+* OAUTH_TOKEN='' - токен яндекс аккаунта, соответствующего платформе Yandex Cloud и имеющего необходиме права на каталоге (админ или эдитор)
+* FOLDER_ID='' - id каталога платформы Yandex Cloud
+* FILE_TOKEN='' - уникальное имя файла со структурой БД конфигурации для загрузки в ваш аккаунт Yandex Studio
+* VAL_FILE_TOKEN='' - уникальное имя файла с правилами синтаксиса запросной системы для загрузки в ваш аккаунт Yandex Studio
+* VECTOR_STORE_TOKEN='' - уникальное имя векторного хранилища с файлом структуры БД конфигурации для создания в вашем аккаунте Yandex Studio
+* VAL_VECTOR_STORE_TOKEN=''- ункиальное имя векторного хранилища с файлом правил синтаксиса запросной системы для создания в вашем аккаунте Yandex Studio
+* PATH_TO_SYNTAX - путь к файлу с правилами синтаксиса запросной системы в проекте
+* MODEL - uri используемой модели
+* BASE_URL - url для обращения к API Yandex Studio и Yandex Cloud
+* WEBHOOK - исходящий вебхук для обращения к API вашегой портала Bitrix24 
+* BOT_TOKEN - токен бота (придумать уникальной самостоятельно)
+* BOT_NAME - имя бота
+* BOT_CODE - код бота
+* BOT_WORK_POSITION - позиция бота
+* DATABASE_URL - url подключения к базе данных
+2. Запустите Docker Desktop.
+3. Введите команду: docker compose up -d --build.
+4. В вашем портале Bitrix24 должен стать доступен чат-бот, которого можно найти по названию или по коду.
 
-**Интеграция с Yandex GPT 5**:
-* **Инициализация (получения IAM-токена, загрузка файла и создание векторного индекса)** - python/yandex_cloud/integration/init.py;
-* **Отправить запрос к Yandex GPT 5 без файлового поиска** - python/yandex_cloud/examples/example_response_without_file_search.py;
-* **Отправить запрос к Yandex GPT 5 c файловым поиском** - python/yandex_cloud/examples/example_response_with_file_search.py.
