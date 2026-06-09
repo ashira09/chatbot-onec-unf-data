@@ -8,6 +8,7 @@ try:
     import Levenshtein
     def edit_distance(s1, s2):
         return Levenshtein.distance(s1, s2)
+    print('good')
 except ImportError:
     from difflib import SequenceMatcher
     def edit_distance(s1, s2):
@@ -56,7 +57,7 @@ def compute_ex(ref_data, gen_data):
 # ⚙️ КОНФИГУРАЦИЯ
 TEST_CASES_PATH = "./tests/data/test_cases.json"
 RESULTS_PATH    = "./tests/data/metrics_results.json"
-EMBED_MODEL     = "sergeyzh/BERTA"  # Модель из статьи. При первом запуске скачается (~1.3 ГБ)
+EMBED_MODEL     = "sergeyvi4ev/all-MiniLM-ragsql-code"  # Модель из статьи. При первом запуске скачается (~1.3 ГБ)
 W_WEIGHT        = 0.5                            # Баланс между SC и ST (согласно статье)
 
 def load_embedding_model():
@@ -65,7 +66,7 @@ def load_embedding_model():
         return SentenceTransformer(EMBED_MODEL)
     except Exception:
         print("Модель не найдена, используется лёгкий fallback: all-MiniLM-L6-v2")
-        return SentenceTransformer("all-MiniLM-L6-v2")
+        return SentenceTransformer("sergeyvi4ev/all-MiniLM-ragsql-code")
 
 def compute_sc(model, q1, q2):
     """Семантическая схожесть (Cosine Similarity над эмбеддингами кода)"""
